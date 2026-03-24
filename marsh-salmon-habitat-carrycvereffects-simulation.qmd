@@ -1,0 +1,406 @@
+---
+title: "Understanding immediate and carry-over effects to prioritise habitat protection and restoration: a case study of threatened Atlantic salmon"
+format: 
+  html:
+    self-contained: true
+    toc: true
+execute: 
+  message: false
+  warning: false
+lightbox: true
+---
+
+
+# Set up
+
+```{r}
+#| label: setup
+#| results: hide 
+
+# Set up --------------------------------------------------------------
+
+## start with clean workspace
+rm(list = ls())
+
+## libraries
+require(rjags)
+load.module("glm")
+require(dclone) # for jags fitting
+require(data.table) # for sample summarising
+require(ggplot2) # for plotting
+require(boot) # for inv.logit
+require(posterior) # for model diagnostics
+
+## mcmc settings
+setts <- list("n.adapt" = 20000, # 10000,
+              "n.chains" = 4,
+              "n.update" = 10000,
+              "n.iter" = 50000, # 20000,
+              "thin" = 500) # 100)
+
+```
+
+
+# Simulate data
+
+```{r}
+#| label: sim-data
+
+# Simulate data -------------------------------------------------------
+
+## design parameters
+nPasses <- 4
+K <- nPasses + 1
+nSites <- 20
+nYears <- sample(5:10, nSites, replace = TRUE, prob = 5:10)
+n <- sum(nYears)
+sts <- rep(1:nSites, nYears)
+yrs <- unlist(sapply(nYears, seq_len))
+
+## sampling parameters
+mean_p <- 0.5
+alpha_p <- logit(mean_p)
+sites <- 1:nSites
+beta_site_p <- c(0, rnorm(nSites-1, mean = -0.3, sd = 0.5))
+x_p <- rnorm(n, 0, 1)
+beta_x_p <- -0.2
+p_logit <- alpha_p + beta_site_p[sts] + (beta_x_p * x_p)
+p <- inv.logit(p_logit)
+all_p <- matrix(NA, nrow = n, ncol = K)
+for(i in 1:n){
+  all_p[i, ] <- c(p[i], (1 - p[i]) * p[i], (1 - p[i])^2 * p[i], (1 - p[i])^3 * p[i], (1 - p[i])^4)
+}
+
+## simulate the abundance data
+alpha_exp <- 60
+alpha <- log(alpha_exp)
+x <- rnorm(n, 0, 1)
+beta_x <- 0.5
+beta_x2 <- -0.1
+sd_nu <- sample(seq(0, 1, by = 0.1), nSites, replace = TRUE)
+nu <- unlist(sapply(nYears, \(x) rnorm(x, 0, sd_nu[x])))
+lam <- exp(alpha + (beta_x * x) + (beta_x2 * x^2) + nu)
+N <- rpois(n, lam)
+prob_tag <- sample(c(0.5,0.6,0.7,0.8,0.9,1), size = n, replace = TRUE)
+N_tag <- rbinom(n, N, prob_tag)
+
+## catches; using Carle Strub removal
+all_catches <- matrix(NA, nrow = n, ncol = K)
+for (i in 1:n) {
+  all_catches[i, ] <- rmultinom(n = 1, size = N[i], prob = all_p[i, ])
+}
+catches <- all_catches[, -K]
+
+## prepare catches
+Catch <- data.table(catches)
+colnames(Catch) <- paste0('Catch ', 1:4)
+
+## remove some third and fourth runs; removing just one here to illustrate it works
+Catch[2, 3:4] <- NA
+
+## simulate the length data
+alpha_len <- 12 # 9.7 
+len_tau <- 0.02 
+beta_x_len <- 0.5 #0.1
+beta_abund_len <- -1.5 #-0.05
+sd_nu_len <- 0.5 #1 
+nu_len <- rnorm(nSites, 0, sd_nu_len)
+mu_len <- alpha_len + (beta_x_len * x) + (beta_abund_len * log(N)) + nu_len[sts]
+lengths <- rnorm(n, mu_len, len_tau)
+
+## simulate prob of survival to migrants
+mean_sm <- 0.01 #0.005
+alpha_sm <- logit(mean_sm) # -5 # -2
+beta_sm_len <- 0.8 # 0.2
+beta_sm_abund <- -0.4 # -0.1
+smolt_logit <- alpha_sm + (beta_sm_len * lengths) + (beta_sm_abund * log(N))
+smolt <- inv.logit(smolt_logit)
+smolt_surv <- rbinom(n, N_tag, smolt)
+
+```
+
+
+# Model fitting
+
+```{r}
+#| label: model-fitting
+#| results: hide
+
+# Model fitting -------------------------------------------------------
+
+## jags model function
+f <- function() {
+  
+  # priors length model
+  alpha_len ~ dnorm(0, 0.01)
+  beta_abund_len ~ dnorm(0, 0.01)
+  tau_len ~ dgamma(0.01, 0.01)
+  sd_len <- 1/sqrt(tau_len)
+  beta_x_len ~ dnorm(0, 0.01)
+  
+  # priors catches
+  alpha ~ dunif(-20, 20) # dnorm(0, 0.001)
+  beta_x ~ dunif(-20, 20) # dnorm(0, 0.001)
+  beta_x2 ~ dunif(-20, 20) # dnorm(0, 0.001)
+  
+  # priors p
+  # alpha_p ~ dunif(-20, 20) # dnorm(0, 0.001)
+  #mean_p ~ dunif(0, 1)
+  #alpha_p <- logit(mean_p)
+  alpha_p ~ dlogis(0, 1)
+  beta_x_p ~ dunif(-20, 20) # dnorm(0, 0.001)
+  
+  # site effect on p
+  beta_p_site[1] <- 0
+  for(s in 2:nSites){
+    beta_p_site[s] ~ dunif(-20, 20) # dnorm(0, 0.001)
+  }
+  for(i in 1:n){
+    mu_p[i] <- alpha_p + beta_p_site[site[i]] + beta_x_p * x_p[i]
+    logit(p[i]) <- mu_p[i]
+  }
+  
+  # year in site random effect
+  for(s in 1:nSites){
+    tau_nu[s] ~ dgamma(0.01, 0.01)
+    for(y in 1:nYears[s]){
+      nu[s, y] ~ dnorm(0, tau_nu[s])
+    }
+    sd_nu[s] <- 1/sqrt(tau_nu[s])
+  }
+  
+  # site random effect length
+  tau_s_len ~ dgamma(0.01, 0.01)
+  for(s in 1:nSites){
+    nu_len[s] ~ dnorm(0, tau_s_len)
+  }
+  sd_nu_len <- 1/sqrt(tau_s_len)
+  
+  # priors smolt
+  # alpha_sm ~ dlogis(0, 1) # dnorm(0, 0.001)
+  # mean_sm ~ dunif(0, 1) # dnorm(0, 0.001)
+  # alpha_sm <- logit(mean_sm) # dnorm(0, 0.001)
+  alpha_sm ~ dlogis(0, 1)
+  beta_sm_len ~ dunif(-20, 20) # dnorm(0, 0.001)
+  beta_sm_abund ~ dunif(-20, 20) # dnorm(0, 0.001)
+  
+  # likelihood 
+  for(i in 1:n){
+    
+    # parr abundance model
+    exp_lam[i] <- alpha +
+      beta_x * x[i] +
+      beta_x2 * x2[i] +
+      nu[site[i], year[i]]
+    log(lam[i]) <- exp_lam[i]
+    N[i] ~ dpois(lam[i])
+    
+    # observation model
+    Catch[i, 1] ~ dbin(p[i], N[i])
+    Catch[i, 2] ~ dbin(p[i], (N[i] - Catch[i, 1]))
+    Catch[i, 3] ~ dbin(p[i], (N[i] - Catch[i, 1] - Catch[i, 2]))
+    Catch[i, 4] ~ dbin(p[i], (N[i] - Catch[i, 1] - Catch[i, 2] - Catch[i, 3]))
+    
+    # parr length model
+    mu[i] <- alpha_len + 
+      beta_abund_len * log(N[i]) +
+      beta_x_len * x[i] +
+      nu_len[site[i]]
+    length[i] ~ dnorm(mu[i], tau_len)
+    
+    # smolt detection model
+    logit(smolt_lam[i]) <- alpha_sm + (beta_sm_len * length[i]) + (beta_sm_abund * log(N[i]))
+    smolt_surv[i] ~ dbin(smolt_lam[i], N_tag[i])
+  }
+}  
+
+## data
+d_l <- list()
+d_l$Catch <- Catch
+d_l$x <- x
+d_l$x2 <- d_l$x^2
+d_l$n <- nrow(Catch)
+d_l$nYears <- nYears
+d_l$nSites <- nSites
+d_l$year <- yrs
+d_l$site <- sts
+d_l$x_p <- x_p
+d_l$smolt_surv <- smolt_surv
+d_l$length <- lengths
+d_l$N_tag <- N_tag
+
+## generating parameters
+pars <- c('alpha','alpha_len','alpha_p', 'beta_x', 'beta_x_len', 'beta_abund_len', 'beta_x_p', 'beta_p_site', 'N', 'exp_lam', 'lam', 'p', 'sd_nu', 'nu', 'tau_nu', 'tau_s_len', 'tau_s', 'mu', 'length', 'nu_len', 'sd_nu_len', 'alpha_sm', 'beta_sm_len', 'smolt_lam', 'smolt_surv', 'beta_sm_abund', "beta_x2", "theta")
+
+## monitors
+mons <- c(pars)
+
+## inits
+inits <- function() list(N = rep(max(rowSums(Catch, na.rm = TRUE)), nrow(Catch)))
+
+## debugging
+if (0) {
+  fii <- jags.fit(data = d_l, params = mons, inits = inits, model = f)
+  stop()
+}
+
+## setup clusters
+cl <- makePSOCKcluster(setts$n.chains)
+parLoadModule(cl, 'lecuyer')
+parLoadModule(cl, 'dic')
+parLoadModule(cl, 'glm')
+
+## jags fit
+parJagsModel(cl = cl, name = 'res', file = f, 
+             data = d_l, inits = inits,
+             n.chains = setts$n.chains, n.adapt = setts$n.adapt)
+parUpdate(cl = cl, object = 'res', 
+          n.iter = setts$n.update)
+s <- parCodaSamples(cl = cl, model = 'res',
+                    variable.names = mons, 
+                    n.iter = setts$n.iter, 
+                    thin = setts$thin)
+
+## summarise fit
+foo <- stack(s)
+
+## create data.table
+s_dt <- data.table(foo, keep.rownames = TRUE)
+setkey(s_dt, variable, chain, iter)
+
+## calculate the quantiles across chains
+s_sum <- s_dt[, list(rn = rn[1],
+                     mean = mean(value),
+                     sd = sd(value),
+                     min = min(value),
+                     q025 = quantile(value, 0.025),
+                     q25 = quantile(value, 0.25),
+                     q50 = quantile(value, 0.50),
+                     q75 = quantile(value, 0.75),
+                     q975 = quantile(value, 0.975),
+                     max = max(value)),
+              by = list(variable)]
+o <- order(as.numeric(s_sum$rn))
+s_sum <- s_sum[o, ]
+s_sum$variable <- factor(s_sum$variable, levels = s_sum$variable)
+
+## remove variables
+s_sum <- s_sum[, -'rn']
+
+## stop cluster
+parUnloadModule(cl, 'glm')
+parUnloadModule(cl, 'dic')
+parUnloadModule(cl, 'lecuyer')
+stopCluster(cl)
+
+```
+
+
+# Results
+
+```{r}
+#| label: results
+
+# Results -------------------------------------------------------------
+
+## add actuals
+coefs <- s_sum[grep('alpha|beta|sd_nu', variable), ]
+coefs[, actual := c(alpha, alpha_len, alpha_p, alpha_sm, beta_abund_len, beta_site_p, beta_sm_abund, beta_sm_len, beta_x, beta_x2, beta_x_len, beta_x_p, sd_nu, sd_nu_len)]
+
+p1 <- ggplot(coefs[!which(variable == "alpha_len"),], aes(x = variable)) +
+  geom_point(aes(y = actual), col = "black") +
+  geom_point(aes(y = mean), col = "red") +
+  geom_errorbar(aes(ymin = q025, ymax = q975), width = .5, col = "red") +
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45))
+
+p2 <- ggplot(coefs[which(variable == "alpha_len"),], aes(x = variable)) +
+  geom_point(aes(y = actual), col = "black") +
+  geom_point(aes(y = mean), col = "red") +
+  geom_errorbar(aes(ymin = q025, ymax = q975), width = .5, col = "red") +
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45))
+
+# N
+est_n <- s_sum[grep('^lam\\[', variable), ]
+est_n[, c("id", "actual") := .(1:nrow(est_n),lam)]
+
+p3 <- ggplot(est_n, aes(x = id)) +
+  geom_point(aes(y = actual), col = "black") +
+  geom_point(aes(y = mean), col = "red") +
+  geom_errorbar(aes(ymin = q025, ymax = q975), width = .5, col = "red") +
+  theme_bw() + 
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+
+# lengths
+est_lens <- s_sum[grep('mu\\[', variable), ]
+est_lens[, c("id", "actual") := .(1:nrow(est_lens), mu_len)]
+
+p4 <- ggplot(est_lens, aes(x = id)) +
+  geom_point(aes(y = actual), col = "black") +
+  geom_point(aes(y = mean), col = "red") +
+  geom_errorbar(aes(ymin = q025, ymax = q975), width = .5, col = "red") +
+  theme_bw() + 
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+
+# smolt survival
+est_surv <- s_sum[grep('smolt_lam\\[', variable), ]
+est_surv[, c("id", "actual") := .(1:nrow(est_surv), smolt)]
+
+p5 <- ggplot(est_surv, aes(x = id)) +
+  geom_point(aes(y = actual), col = "black") +
+  geom_point(aes(y = mean), col = "red") +
+  geom_errorbar(aes(ymin = q025, ymax = q975), width = .5, col = "red") +
+  theme_bw() + 
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+
+## trace plots
+tp_sub <- s_dt[grep('alpha|beta|tau', variable),]
+
+p6 <- ggplot(tp_sub, aes(x = iter, y = value)) + 
+  geom_line() +
+  facet_wrap(~ variable, scales = 'free') +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+
+tp_sub2 <- s_dt[grep('^nu', variable),]
+
+p7 <- ggplot(tp_sub2[1:42000, ], aes(x = iter, y = value)) + 
+  geom_line() +
+  facet_wrap(~ variable, scales = 'free') +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+
+p8 <- ggplot(tp_sub2[42001:nrow(tp_sub2), ], aes(x = iter, y = value)) + 
+  geom_line() +
+  facet_wrap(~ variable, scales = 'free') +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+
+## model diagnostics
+tmp <- as.data.table(summarize_draws(s))
+foo <- tmp[grep('alpha|beta|tau', variable),]
+# diag_sum <- MCMCsummary(s, round = 2)
+# diag_sum$variable <- rownames(diag_sum)
+# diag_sum <- as.data.table(diag_sum)
+
+```
+
+
+# Plots
+
+```{r}
+#| label: plots
+
+# Plots ---------------------------------------------------------------
+
+print(p1)
+print(p2)
+print(p3)
+print(p4)
+print(p5)
+print(p6)
+print(p7)
+print(p8)
+
+# print(diag_sum[grep('alpha|beta|tau', variable), ])
+foo[rhat > 1.01, ]
+
+```
