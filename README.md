@@ -2,7 +2,7 @@
 
 Contact: [email: Stephen Gregory](mailto:stephen.gregory@cefas.gov.uk) / [GitHub: stephendavidgregory](https://github.com/stephendavidgregory)
 
-> This information is licenced under the conditions of the Open Government Licence found in the [LICENSE.txt](LICENSE.txt) file and at: http://www.nationalarchives.gov.uk/doc/open-government-licence/version/3
+> This information is licenced under the conditions of the Open Government Licence found in the [LICENCE.txt](LICENCE.txt) file and at: http://www.nationalarchives.gov.uk/doc/open-government-licence/version/3
 
 This repository contains code used in the paper:
 
