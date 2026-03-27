@@ -8,7 +8,7 @@ This repository contains code used in this paper (link TBC).
 
 To cite the paper:
 
-> Marsh, J. E., Gillson, J. P., Riley, W. D., Elliott, S. A. M, Gregory, S. D. (2026) Understanding immediate and carry-over effects to prioritise habitat protection and restoration: a case study of threatened Atlantic salmon. *Biological Conservation*, Volume 317, 111822. doi:(10.1016/j.biocon.2026.111822)[https://doi.org/10.1016/j.biocon.2026.111822]
+> Marsh, J. E., Gillson, J. P., Riley, W. D., Elliott, S. A. M, Gregory, S. D. (2026) Understanding immediate and carry-over effects to prioritise habitat protection and restoration: a case study of threatened Atlantic salmon. *Biological Conservation*, Volume 317, 111822. doi: https://doi.org/10.1016/j.biocon.2026.111822
 
 ## Simulations & code
 
