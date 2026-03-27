@@ -18,4 +18,4 @@ To compile it yourself, you should run the file through [quarto](https://quarto.
 
 ## Data availability
 
-This document uses simulation data. The data used in the analysis are available at Zenodo from [https://doi.org/10.5281/zenodo.19205913](10.5281/zenodo.19205913).
+This document uses simulation data. The data used in the analysis are available at Zenodo from [https://doi.org/10.5281/zenodo.19205913](https://doi.org/10.5281/zenodo.19205913).
